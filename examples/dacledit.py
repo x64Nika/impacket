@@ -428,13 +428,27 @@ class DACLedit(object):
             self.ldap_session.search(self.domain_dumper.root, '(objectSid=%s)' % _lookedup_principal, attributes=['nTSecurityDescriptor'], controls=controls)
         elif self.target_DN is not None:
             _lookedup_principal = self.target_DN
-            self.ldap_session.search(_lookedup_principal, '(distinguishedName=%s)' % _lookedup_principal, attributes=['nTSecurityDescriptor'], controls=controls)
+            # Fetch the object by its DN with a base-scoped '(objectClass=*)' search.
+            # Filtering on the constructed 'distinguishedName' attribute is unreliable: for objects
+            # the caller can only partially read (e.g. objects in the DomainDnsZones/ForestDnsZones
+            # application partitions), it returns no result, producing a misleading "not found".
+            # A base-scoped '(objectClass=*)' is the canonical way to read a single object by DN.
+            self.ldap_session.search(_lookedup_principal, '(objectClass=*)', search_scope=ldap3.BASE, attributes=['nTSecurityDescriptor'], controls=controls)
         try:
             self.target_principal = self.ldap_session.entries[0]
             logging.debug('Target principal found in LDAP (%s)' % _lookedup_principal)
         except IndexError:
             logging.error('Target principal not found in LDAP (%s)' % _lookedup_principal)
-            exit(0)
+            exit(1)
+        # The object may exist while its nTSecurityDescriptor is not returned: reading the DACL
+        # requires READ_CONTROL over the object. Report this explicitly instead of crashing later
+        # on an empty attribute (which used to surface as an opaque "list index out of range").
+        if 'nTSecurityDescriptor' not in self.target_principal.entry_attributes \
+                or not self.target_principal['nTSecurityDescriptor'].raw_values:
+            logging.error('The security descriptor of %s could not be read with the provided account '
+                          '(READ_CONTROL is required to read the DACL). Try a more privileged account.'
+                          % self.target_principal.entry_dn)
+            exit(1)
 
     
     # Attempts to retieve the SID and Distinguisehd Name from the sAMAccountName
